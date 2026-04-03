@@ -1,102 +1,140 @@
-const jwt = require("jsonwebtoken");
 const User = require("../models/User");
-const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
-/* ================== PROTECT ROUTES ================== */
-exports.protect = async (req, res, next) => {
+/* ================== TOKENS ================== */
+const generateAccessToken = (user) => {
+  return jwt.sign(
+    { id: user._id, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: "15m" }
+  );
+};
+
+const generateRefreshToken = (user) => {
+  return jwt.sign(
+    { id: user._id },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: "7d" }
+  );
+};
+
+/* ================== REGISTER ================== */
+exports.register = async (req, res) => {
   try {
-    let token;
+    let { name, email, password } = req.body;
 
-    // 🔐 Extract token
-    if (
-      req.headers.authorization &&
-      req.headers.authorization.startsWith("Bearer")
-    ) {
-      token = req.headers.authorization.split(" ")[1];
+    if (!name || !email || !password) {
+      return res.status(400).json({ success: false, message: "All fields are required" });
     }
 
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: "Not authorized, token missing",
-      });
+    email = email.toLowerCase().trim();
+
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, message: "Password must be at least 6 characters" });
     }
 
-    if (typeof token !== "string" || token.split(".").length !== 3) {
-      return res.status(401).json({
-        success: false,
-        message: "Malformed token",
-      });
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({ success: false, message: "User already exists" });
     }
 
-    // 🔑 Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.create({ name: name.trim(), email, password });
 
-    if (!mongoose.Types.ObjectId.isValid(decoded.id)) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid token payload",
-      });
-    }
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken(user);
 
-    const user = await User.findById(decoded.id)
-      .select("name email role createdAt updatedAt");
+    user.refreshToken = refreshToken;
+    await user.save();
 
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "User no longer exists",
-      });
-    }
-
-    // attach user to request
-    req.user = user;
-
-    next();
+    return res.status(201).json({
+      success: true,
+      message: "User registered successfully",
+      accessToken,
+      refreshToken,
+    });
 
   } catch (error) {
-    console.error("Auth Error:", error.message);
-
-    let message = "Not authorized";
-
-    if (error.name === "TokenExpiredError") {
-      message = "Token expired";
-    } else if (error.name === "JsonWebTokenError") {
-      message = "Invalid token";
-    }
-
-    return res.status(401).json({
-      success: false,
-      message,
-    });
+    console.error("Register Error:", error);
+    return res.status(500).json({ success: false, message: "Internal Server Error" });
   }
 };
 
-/* ================== AUTHORIZE ROLES ================== */
-exports.authorize = (...roles) => {
-  return (req, res, next) => {
+/* ================== LOGIN ================== */
+exports.login = async (req, res) => {
+  try {
+    let { email, password } = req.body;
 
-    // 👑 Super admin bypass
-    if (req.user && req.user.role === "super_admin") {
-      return next();
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: "Email and password are required" });
     }
 
-    // ❌ No user attached
-    if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: "Not authorized",
-      });
+    email = email.toLowerCase().trim();
+
+    const user = await User.findOne({ email }).select("+password +refreshToken");
+
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
 
-    // ❌ Role not allowed
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied",
-      });
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken(user);
+
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      accessToken,
+      refreshToken,
+    });
+
+  } catch (error) {
+    console.error("Login Error:", error);
+    return res.status(500).json({ success: false, message: "Internal Server Error" });
+  }
+};
+
+/* ================== REFRESH TOKEN ================== */
+exports.refreshToken = async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({ success: false, message: "Refresh token required" });
     }
 
-    next();
-  };
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+
+    // ✅ Must select refreshToken field explicitly (select: false in schema)
+    const user = await User.findById(decoded.id).select("+refreshToken");
+
+    if (!user || user.refreshToken !== refreshToken) {
+      return res.status(401).json({ success: false, message: "Invalid refresh token" });
+    }
+
+    const accessToken = generateAccessToken(user);
+
+    return res.status(200).json({ success: true, accessToken });
+
+  } catch (error) {
+    console.error("Refresh Token Error:", error);
+    return res.status(401).json({ success: false, message: "Invalid or expired refresh token" });
+  }
+};
+
+/* ================== LOGOUT ================== */
+exports.logout = async (req, res) => {
+  try {
+    // req.user comes from protect middleware
+    // but refreshToken wasn't selected there, so we update by ID
+    await User.findByIdAndUpdate(req.user._id, { refreshToken: null });
+
+    return res.status(200).json({ success: true, message: "Logged out successfully" });
+
+  } catch (error) {
+    console.error("Logout Error:", error);
+    return res.status(500).json({ success: false, message: "Internal Server Error" });
+  }
 };

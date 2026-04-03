@@ -124,3 +124,23 @@ exports.login = async (req, res) => {
     });
   }
 };
+exports.refreshToken = async (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) return res.status(400).json({ success: false, message: "Refresh token required" });
+  try {
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    const user = await User.findById(decoded.id);
+    if (!user || user.refreshToken !== refreshToken)
+      return res.status(401).json({ success: false, message: "Invalid refresh token" });
+    const accessToken = generateAccessToken(user);
+    return res.status(200).json({ success: true, accessToken });
+  } catch {
+    return res.status(401).json({ success: false, message: "Invalid or expired refresh token" });
+  }
+};
+
+exports.logout = async (req, res) => {
+  req.user.refreshToken = null;
+  await req.user.save();
+  return res.status(200).json({ success: true, message: "Logged out" });
+};
