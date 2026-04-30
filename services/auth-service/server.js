@@ -54,7 +54,17 @@ const limiter = rateLimit({
   },
 });
 
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: {
+    success: false,
+    message: "Too many requests, please try again later",
+  },
+});
+
 app.use("/api/auth", limiter);
+app.use("/api/chat", apiLimiter);
 
 /* ================== LOGGER ================== */
 app.use(morgan("dev"));
@@ -71,7 +81,7 @@ app.get("/", (req, res) => {
 });
 
 /* ================== PROTECTED ================== */
-app.get("/api/profile", protect, (req, res) => {
+app.get("/api/profile", apiLimiter, protect, (req, res) => {
   res.json({
     success: true,
     user: req.user,

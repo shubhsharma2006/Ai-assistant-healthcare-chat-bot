@@ -1,140 +1,58 @@
 const User = require("../models/User");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-/* ================== TOKENS ================== */
-const generateAccessToken = (user) => {
-  return jwt.sign(
-    { id: user._id, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: "15m" }
-  );
-};
-
-const generateRefreshToken = (user) => {
-  return jwt.sign(
-    { id: user._id },
-    process.env.JWT_REFRESH_SECRET,
-    { expiresIn: "7d" }
-  );
-};
-
-/* ================== REGISTER ================== */
-exports.register = async (req, res) => {
+/* ================== PROTECT ================== */
+exports.protect = async (req, res, next) => {
   try {
-    let { name, email, password } = req.body;
+    let token;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ success: false, message: "All fields are required" });
+    if (
+      req.headers.authorization &&
+      req.headers.authorization.startsWith("Bearer ")
+    ) {
+      token = req.headers.authorization.split(" ")[1];
     }
 
-    email = email.toLowerCase().trim();
-
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: "Password must be at least 6 characters" });
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Not authorized, no token",
+      });
     }
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(409).json({ success: false, message: "User already exists" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    const user = await User.findById(decoded.id);
+
+    if (!user || !user.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: "User no longer exists or is inactive",
+      });
     }
 
-    const user = await User.create({ name: name.trim(), email, password });
+    req.user = user;
+    next();
 
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
+  } catch (error) {
+    console.error("Auth Middleware Error:", error.message);
 
-    user.refreshToken = refreshToken;
-    await user.save();
-
-    return res.status(201).json({
-      success: true,
-      message: "User registered successfully",
-      accessToken,
-      refreshToken,
+    return res.status(401).json({
+      success: false,
+      message: "Not authorized, invalid token",
     });
-
-  } catch (error) {
-    console.error("Register Error:", error);
-    return res.status(500).json({ success: false, message: "Internal Server Error" });
   }
 };
 
-/* ================== LOGIN ================== */
-exports.login = async (req, res) => {
-  try {
-    let { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: "Email and password are required" });
+/* ================== AUTHORIZE ================== */
+exports.authorize = (...roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `Role '${req.user.role}' is not authorized to access this route`,
+      });
     }
-
-    email = email.toLowerCase().trim();
-
-    const user = await User.findOne({ email }).select("+password +refreshToken");
-
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).json({ success: false, message: "Invalid email or password" });
-    }
-
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
-
-    user.refreshToken = refreshToken;
-    await user.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Login successful",
-      accessToken,
-      refreshToken,
-    });
-
-  } catch (error) {
-    console.error("Login Error:", error);
-    return res.status(500).json({ success: false, message: "Internal Server Error" });
-  }
-};
-
-/* ================== REFRESH TOKEN ================== */
-exports.refreshToken = async (req, res) => {
-  try {
-    const { refreshToken } = req.body;
-
-    if (!refreshToken) {
-      return res.status(400).json({ success: false, message: "Refresh token required" });
-    }
-
-    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-
-    // ✅ Must select refreshToken field explicitly (select: false in schema)
-    const user = await User.findById(decoded.id).select("+refreshToken");
-
-    if (!user || user.refreshToken !== refreshToken) {
-      return res.status(401).json({ success: false, message: "Invalid refresh token" });
-    }
-
-    const accessToken = generateAccessToken(user);
-
-    return res.status(200).json({ success: true, accessToken });
-
-  } catch (error) {
-    console.error("Refresh Token Error:", error);
-    return res.status(401).json({ success: false, message: "Invalid or expired refresh token" });
-  }
-};
-
-/* ================== LOGOUT ================== */
-exports.logout = async (req, res) => {
-  try {
-    // req.user comes from protect middleware
-    // but refreshToken wasn't selected there, so we update by ID
-    await User.findByIdAndUpdate(req.user._id, { refreshToken: null });
-
-    return res.status(200).json({ success: true, message: "Logged out successfully" });
-
-  } catch (error) {
-    console.error("Logout Error:", error);
-    return res.status(500).json({ success: false, message: "Internal Server Error" });
-  }
+    next();
+  };
 };
